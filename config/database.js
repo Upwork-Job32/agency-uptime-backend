@@ -157,6 +157,44 @@ async function initializeDatabase() {
         FOREIGN KEY (agency_id) REFERENCES agencies (id) ON DELETE CASCADE
       );
 
+      -- Slack integrations table
+      CREATE TABLE IF NOT EXISTS slack_integrations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agency_id INTEGER NOT NULL,
+        webhook_url TEXT NOT NULL,
+        channel TEXT,
+        is_active BOOLEAN DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agency_id) REFERENCES agencies (id) ON DELETE CASCADE
+      );
+
+      -- Alert settings table
+      CREATE TABLE IF NOT EXISTS alert_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agency_id INTEGER NOT NULL,
+        email_alerts BOOLEAN DEFAULT 1,
+        slack_alerts BOOLEAN DEFAULT 0,
+        webhook_alerts BOOLEAN DEFAULT 0,
+        ghl_alerts BOOLEAN DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agency_id) REFERENCES agencies (id) ON DELETE CASCADE
+      );
+
+      -- Webhook settings table
+      CREATE TABLE IF NOT EXISTS webhook_settings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        agency_id INTEGER NOT NULL,
+        webhook_url TEXT NOT NULL,
+        name TEXT,
+        headers TEXT,
+        is_active BOOLEAN DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (agency_id) REFERENCES agencies (id) ON DELETE CASCADE
+      );
+
       -- Create indexes for better performance
       CREATE INDEX IF NOT EXISTS idx_sites_agency_id ON sites(agency_id);
       CREATE INDEX IF NOT EXISTS idx_monitoring_logs_site_id ON monitoring_logs(site_id);

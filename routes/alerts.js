@@ -212,7 +212,7 @@ router.post(
         if (existing) {
           // Update existing integration
           db.run(
-            "UPDATE slack_integrations SET webhook_url = ?, channel = ?, updated_at = CURRENT_TIMESTAMP WHERE agency_id = ?",
+            "UPDATE slack_integrations SET webhook_url = ?, channel = ?, is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE agency_id = ?",
             [webhook_url, channel, req.agency.agencyId],
             (err) => {
               if (err) {
@@ -226,7 +226,7 @@ router.post(
         } else {
           // Create new integration
           db.run(
-            "INSERT INTO slack_integrations (agency_id, webhook_url, channel) VALUES (?, ?, ?)",
+            "INSERT INTO slack_integrations (agency_id, webhook_url, channel, is_active) VALUES (?, ?, ?, 1)",
             [req.agency.agencyId, webhook_url, channel],
             (err) => {
               if (err) {

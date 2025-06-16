@@ -72,6 +72,8 @@ async function testNewSlackWebhook() {
         console.log("4. Paste this URL:", webhookUrl);
         console.log("5. Save the integration");
         console.log("6. Test the alert from the frontend");
+        console.log("\n🔧 Or test it directly with the backend:");
+        console.log("node scripts/test-slack-integration.js");
       } catch (error) {
         console.error("❌ Test failed:", error.message);
         if (error.response) {
