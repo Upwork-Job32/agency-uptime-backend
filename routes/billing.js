@@ -1,13 +1,13 @@
-const express = require("express")
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY)
-const { getDatabase } = require("../config/database")
-const { authenticateToken } = require("../middleware/auth")
+const express = require("express");
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+const { getDatabase } = require("../config/database");
+const { authenticateToken } = require("../middleware/auth");
 
-const router = express.Router()
+const router = express.Router();
 
 // Get subscription status
 router.get("/subscription", authenticateToken, (req, res) => {
-  const db = getDatabase()
+  const db = getDatabase();
 
   db.get(
     `SELECT s.*, 
@@ -19,29 +19,90 @@ router.get("/subscription", authenticateToken, (req, res) => {
     [req.agency.agencyId],
     (err, subscription) => {
       if (err) {
-        return res.status(500).json({ error: "Database error" })
+        return res.status(500).json({ error: "Database error" });
       }
 
       if (!subscription) {
-        return res.status(404).json({ error: "Subscription not found" })
+        // Create default trial subscription if none exists
+        const now = new Date();
+        const trialEndDate = new Date();
+        trialEndDate.setDate(trialEndDate.getDate() + 15);
+
+        db.run(
+          "INSERT INTO subscriptions (agency_id, plan_type, status, trial_start_date, current_period_start, current_period_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          [
+            req.agency.agencyId,
+            "trial",
+            "trialing",
+            now.toISOString(),
+            now.toISOString(),
+            trialEndDate.toISOString(),
+            now.toISOString(),
+          ],
+          function (err) {
+            if (err) {
+              return res
+                .status(500)
+                .json({ error: "Failed to create trial subscription" });
+            }
+
+            res.json({
+              subscription: {
+                id: this.lastID,
+                agency_id: req.agency.agencyId,
+                plan_type: "trial",
+                status: "trialing",
+                trial_start_date: now.toISOString(),
+                current_period_start: now.toISOString(),
+                current_period_end: trialEndDate.toISOString(),
+                active_addons: [],
+              },
+            });
+          }
+        );
+        return;
+      }
+
+      // Check if trial has expired
+      if (subscription.status === "trialing" && subscription.trial_start_date) {
+        const trialStart = new Date(subscription.trial_start_date);
+        const daysSinceStart = Math.floor(
+          (Date.now() - trialStart.getTime()) / (1000 * 60 * 60 * 24)
+        );
+
+        if (daysSinceStart >= 15) {
+          // Update expired trial
+          db.run(
+            "UPDATE subscriptions SET status = 'expired' WHERE id = ?",
+            [subscription.id],
+            (err) => {
+              if (err) {
+                console.error("Error updating expired trial:", err);
+              }
+            }
+          );
+          subscription.status = "expired";
+        }
       }
 
       res.json({
         subscription: {
           ...subscription,
-          active_addons: subscription.active_addons ? subscription.active_addons.split(",") : [],
+          active_addons: subscription.active_addons
+            ? subscription.active_addons.split(",")
+            : [],
         },
-      })
-    },
-  )
-})
+      });
+    }
+  );
+});
 
 // Create Stripe checkout session
 router.post("/create-checkout-session", authenticateToken, async (req, res) => {
   try {
-    const { plan_type = "basic", addons = [] } = req.body
+    const { plan_type = "basic", addons = [] } = req.body;
 
-    const lineItems = []
+    const lineItems = [];
 
     // Base plan
     if (plan_type === "basic") {
@@ -58,7 +119,7 @@ router.post("/create-checkout-session", authenticateToken, async (req, res) => {
           },
         },
         quantity: 1,
-      })
+      });
     }
 
     // Add-ons
@@ -78,8 +139,8 @@ router.post("/create-checkout-session", authenticateToken, async (req, res) => {
               },
             },
             quantity: 1,
-          })
-          break
+          });
+          break;
         case "status_pages":
           lineItems.push({
             price_data: {
@@ -94,8 +155,8 @@ router.post("/create-checkout-session", authenticateToken, async (req, res) => {
               },
             },
             quantity: 1,
-          })
-          break
+          });
+          break;
         case "resell_dashboard":
           lineItems.push({
             price_data: {
@@ -110,10 +171,10 @@ router.post("/create-checkout-session", authenticateToken, async (req, res) => {
               },
             },
             quantity: 1,
-          })
-          break
+          });
+          break;
       }
-    })
+    });
 
     const session = await stripe.checkout.sessions.create({
       payment_method_types: ["card"],
@@ -127,25 +188,27 @@ router.post("/create-checkout-session", authenticateToken, async (req, res) => {
         plan_type,
         addons: JSON.stringify(addons),
       },
-    })
+    });
 
-    res.json({ checkout_url: session.url })
+    res.json({ checkout_url: session.url });
   } catch (error) {
-    console.error("Stripe checkout error:", error)
-    res.status(500).json({ error: "Failed to create checkout session" })
+    console.error("Stripe checkout error:", error);
+    res.status(500).json({ error: "Failed to create checkout session" });
   }
-})
+});
 
 // Handle successful payment
 router.get("/success/:session_id", authenticateToken, async (req, res) => {
   try {
-    const session = await stripe.checkout.sessions.retrieve(req.params.session_id)
+    const session = await stripe.checkout.sessions.retrieve(
+      req.params.session_id
+    );
 
     if (session.client_reference_id !== req.agency.agencyId.toString()) {
-      return res.status(403).json({ error: "Unauthorized" })
+      return res.status(403).json({ error: "Unauthorized" });
     }
 
-    const db = getDatabase()
+    const db = getDatabase();
 
     // Update subscription
     db.run(
@@ -159,31 +222,38 @@ router.get("/success/:session_id", authenticateToken, async (req, res) => {
       ],
       (err) => {
         if (err) {
-          console.error("Database error:", err)
-          return res.status(500).json({ error: "Failed to update subscription" })
+          console.error("Database error:", err);
+          return res
+            .status(500)
+            .json({ error: "Failed to update subscription" });
         }
 
         // Update agency subscription status
-        db.run("UPDATE agencies SET subscription_status = ? WHERE id = ?", ["active", req.agency.agencyId])
+        db.run("UPDATE agencies SET subscription_status = ? WHERE id = ?", [
+          "active",
+          req.agency.agencyId,
+        ]);
 
-        res.json({ message: "Subscription activated successfully" })
-      },
-    )
+        res.json({ message: "Subscription activated successfully" });
+      }
+    );
   } catch (error) {
-    console.error("Payment success error:", error)
-    res.status(500).json({ error: "Failed to process payment success" })
+    console.error("Payment success error:", error);
+    res.status(500).json({ error: "Failed to process payment success" });
   }
-})
+});
 
 // Toggle add-on
 router.post("/toggle-addon", authenticateToken, async (req, res) => {
-  const { addon_type } = req.body
+  const { addon_type } = req.body;
 
-  if (!["pdf_reports", "status_pages", "resell_dashboard"].includes(addon_type)) {
-    return res.status(400).json({ error: "Invalid addon type" })
+  if (
+    !["pdf_reports", "status_pages", "resell_dashboard"].includes(addon_type)
+  ) {
+    return res.status(400).json({ error: "Invalid addon type" });
   }
 
-  const db = getDatabase()
+  const db = getDatabase();
 
   // Check if addon exists
   db.get(
@@ -191,21 +261,27 @@ router.post("/toggle-addon", authenticateToken, async (req, res) => {
     [req.agency.agencyId, addon_type],
     (err, addon) => {
       if (err) {
-        return res.status(500).json({ error: "Database error" })
+        return res.status(500).json({ error: "Database error" });
       }
 
       if (addon) {
         // Toggle existing addon
-        db.run("UPDATE addons SET is_active = ? WHERE id = ?", [addon.is_active ? 0 : 1, addon.id], (err) => {
-          if (err) {
-            return res.status(500).json({ error: "Failed to toggle addon" })
-          }
+        db.run(
+          "UPDATE addons SET is_active = ? WHERE id = ?",
+          [addon.is_active ? 0 : 1, addon.id],
+          (err) => {
+            if (err) {
+              return res.status(500).json({ error: "Failed to toggle addon" });
+            }
 
-          res.json({
-            message: `Add-on ${addon.is_active ? "deactivated" : "activated"} successfully`,
-            is_active: !addon.is_active,
-          })
-        })
+            res.json({
+              message: `Add-on ${
+                addon.is_active ? "deactivated" : "activated"
+              } successfully`,
+              is_active: !addon.is_active,
+            });
+          }
+        );
       } else {
         // Create new addon
         db.run(
@@ -213,18 +289,20 @@ router.post("/toggle-addon", authenticateToken, async (req, res) => {
           [req.agency.agencyId, addon_type, 1],
           (err) => {
             if (err) {
-              return res.status(500).json({ error: "Failed to activate addon" })
+              return res
+                .status(500)
+                .json({ error: "Failed to activate addon" });
             }
 
             res.json({
               message: "Add-on activated successfully",
               is_active: true,
-            })
-          },
-        )
+            });
+          }
+        );
       }
-    },
-  )
-})
+    }
+  );
+});
 
-module.exports = router
+module.exports = router;

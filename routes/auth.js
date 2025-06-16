@@ -55,17 +55,20 @@ router.post(
               }
 
               // Create default subscription with trial period
+              const now = new Date();
               const trialEndDate = new Date();
-              trialEndDate.setDate(trialEndDate.getDate() + 14); // 14-day trial
+              trialEndDate.setDate(trialEndDate.getDate() + 15); // 15-day trial
 
               db.run(
-                "INSERT INTO subscriptions (agency_id, plan_type, status, current_period_start, current_period_end) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO subscriptions (agency_id, plan_type, status, trial_start_date, current_period_start, current_period_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 [
                   this.lastID,
                   "trial",
-                  "active",
-                  new Date().toISOString(),
+                  "trialing",
+                  now.toISOString(),
+                  now.toISOString(),
                   trialEndDate.toISOString(),
+                  now.toISOString(),
                 ]
               );
 

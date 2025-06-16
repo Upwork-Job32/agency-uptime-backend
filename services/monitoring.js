@@ -151,6 +151,8 @@ class MonitoringService {
 
     // Log the result
     const db = getDatabase();
+
+    // First, log the monitoring result
     db.run(
       "INSERT INTO monitoring_logs (site_id, status, response_time, status_code, error_message, worker_node) VALUES (?, ?, ?, ?, ?, ?)",
       [site.id, status, responseTime, statusCode, errorMessage, "local-node"],
@@ -163,6 +165,17 @@ class MonitoringService {
               statusCode || "No response"
             }`
           );
+        }
+      }
+    );
+
+    // Update the site's current status in the sites table
+    db.run(
+      "UPDATE sites SET current_status = ? WHERE id = ?",
+      [status, site.id],
+      (err) => {
+        if (err) {
+          console.error("Failed to update site current status:", err);
         }
       }
     );

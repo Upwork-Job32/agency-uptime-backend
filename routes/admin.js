@@ -2,6 +2,7 @@ const express = require("express");
 const { getDatabase } = require("../config/database");
 const { authenticateToken } = require("../middleware/auth");
 const { monitoringService } = require("../services/monitoring");
+const trialCheckerService = require("../services/trialChecker");
 
 const router = express.Router();
 
@@ -151,11 +152,26 @@ router.post(
 
 // Get monitoring service status
 router.get("/monitoring/status", authenticateToken, (req, res) => {
-  res.json({
-    isRunning: monitoringService.isRunning,
-    activeSiteTimers: monitoringService.siteTimers.size,
-    checkInterval: monitoringService.checkInterval,
-  });
+  const db = getDatabase();
+
+  // Get active sites count for this specific agency
+  db.get(
+    "SELECT COUNT(*) as active_sites FROM sites WHERE agency_id = ? AND is_active = 1",
+    [req.agency.agencyId],
+    (err, result) => {
+      if (err) {
+        console.error("Error getting active sites count:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      res.json({
+        isRunning: monitoringService.isRunning,
+        activeSiteTimers: result.active_sites || 0, // Agency-specific count
+        checkInterval: monitoringService.checkInterval,
+        totalSystemSites: monitoringService.siteTimers.size, // Optional: show total system count
+      });
+    }
+  );
 });
 
 // Restart monitoring service
@@ -170,6 +186,70 @@ router.post("/monitoring/restart", authenticateToken, (req, res) => {
     console.error("Monitoring restart error:", error);
     res.status(500).json({ error: "Failed to restart monitoring service" });
   }
+});
+
+// Trial management endpoints
+
+// Get trial checker service status
+router.get("/trials/status", authenticateToken, (req, res) => {
+  const status = trialCheckerService.getStatus();
+  res.json({
+    service: status,
+    message: "Trial checker service status retrieved",
+  });
+});
+
+// Manually trigger trial expiry check
+router.post("/trials/check", authenticateToken, async (req, res) => {
+  try {
+    await trialCheckerService.triggerCheck();
+    res.json({ message: "Trial expiry check completed successfully" });
+  } catch (error) {
+    console.error("Manual trial check error:", error);
+    res.status(500).json({ error: "Failed to run trial check" });
+  }
+});
+
+// Get all trial users and their status
+router.get("/trials/list", authenticateToken, (req, res) => {
+  const db = getDatabase();
+
+  db.all(
+    `SELECT 
+     a.id, a.name, a.email, a.created_at as agency_created,
+     s.plan_type, s.status, s.trial_start_date, s.current_period_end,
+     CASE 
+       WHEN s.trial_start_date IS NOT NULL 
+       THEN CAST((julianday('now') - julianday(s.trial_start_date)) AS INTEGER)
+       ELSE NULL 
+     END as days_since_trial_start
+     FROM agencies a
+     LEFT JOIN subscriptions s ON a.id = s.agency_id
+     WHERE s.plan_type = 'trial' OR s.status = 'trialing' OR s.status = 'expired'
+     ORDER BY s.trial_start_date DESC`,
+    [],
+    (err, trials) => {
+      if (err) {
+        console.error("Error fetching trials:", err);
+        return res.status(500).json({ error: "Database error" });
+      }
+
+      const enrichedTrials = trials.map((trial) => ({
+        ...trial,
+        is_expired: trial.days_since_trial_start >= 15,
+        days_remaining: Math.max(0, 15 - (trial.days_since_trial_start || 0)),
+      }));
+
+      res.json({
+        trials: enrichedTrials,
+        total: enrichedTrials.length,
+        active_trials: enrichedTrials.filter((t) => t.status === "trialing")
+          .length,
+        expired_trials: enrichedTrials.filter((t) => t.status === "expired")
+          .length,
+      });
+    }
+  );
 });
 
 module.exports = router;

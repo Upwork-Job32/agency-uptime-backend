@@ -18,6 +18,7 @@ const webhookRoutes = require("./routes/webhooks");
 const { initializeDatabase } = require("./config/database");
 const { startMonitoringService } = require("./services/monitoring");
 const { startCronJobs } = require("./services/cron");
+const trialCheckerService = require("./services/trialChecker");
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -94,6 +95,10 @@ async function startServer() {
     // Start cron jobs
     startCronJobs();
     console.log("Cron jobs started");
+
+    // Start trial checker service
+    trialCheckerService.start();
+    console.log("Trial checker service started");
 
     app.listen(PORT, () => {
       console.log(`Agency Uptime Backend running on port ${PORT}`);

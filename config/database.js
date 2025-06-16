@@ -1,26 +1,26 @@
-const sqlite3 = require("sqlite3").verbose()
-const path = require("path")
+const sqlite3 = require("sqlite3").verbose();
+const path = require("path");
 
-const DB_PATH = path.join(__dirname, "../database/agency_uptime.db")
+const DB_PATH = path.join(__dirname, "../database/agency_uptime.db");
 
-let db
+let db;
 
 function getDatabase() {
   if (!db) {
     db = new sqlite3.Database(DB_PATH, (err) => {
       if (err) {
-        console.error("Error opening database:", err)
+        console.error("Error opening database:", err);
       } else {
-        console.log("Connected to SQLite database")
+        console.log("Connected to SQLite database");
       }
-    })
+    });
   }
-  return db
+  return db;
 }
 
 async function initializeDatabase() {
   return new Promise((resolve, reject) => {
-    const db = getDatabase()
+    const db = getDatabase();
 
     // Create tables
     const createTables = `
@@ -48,6 +48,7 @@ async function initializeDatabase() {
         check_interval INTEGER DEFAULT 300,
         check_type TEXT DEFAULT 'http',
         is_active BOOLEAN DEFAULT 1,
+        current_status TEXT DEFAULT 'unknown',
         tags TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -162,21 +163,21 @@ async function initializeDatabase() {
       CREATE INDEX IF NOT EXISTS idx_monitoring_logs_checked_at ON monitoring_logs(checked_at);
       CREATE INDEX IF NOT EXISTS idx_incidents_site_id ON incidents(site_id);
       CREATE INDEX IF NOT EXISTS idx_alerts_agency_id ON alerts(agency_id);
-    `
+    `;
 
     db.exec(createTables, (err) => {
       if (err) {
-        console.error("Error creating tables:", err)
-        reject(err)
+        console.error("Error creating tables:", err);
+        reject(err);
       } else {
-        console.log("Database tables created successfully")
-        resolve()
+        console.log("Database tables created successfully");
+        resolve();
       }
-    })
-  })
+    });
+  });
 }
 
 module.exports = {
   getDatabase,
   initializeDatabase,
-}
+};
