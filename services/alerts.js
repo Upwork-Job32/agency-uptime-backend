@@ -401,13 +401,13 @@ class AlertService {
         )}...`
       );
 
-      // Get real site statuses from monitoring data
+      // Get real site statuses from monitoring data with enhanced details
       const siteStatuses = await Promise.all(
         sites.map(async (site) => {
           return new Promise((resolve) => {
             // Get the latest monitoring log for this site
             db.get(
-              `SELECT status, response_time, checked_at, error_message 
+              `SELECT status, response_time, checked_at, error_message, status_code
                FROM monitoring_logs 
                WHERE site_id = ? 
                ORDER BY checked_at DESC 
@@ -425,25 +425,46 @@ class AlertService {
                     status: site.current_status || "unknown",
                     last_checked: new Date().toISOString(),
                     response_time: null,
-                    error_message: "Unable to fetch monitoring data",
+                    status_code: null,
+                    error_message: "Database error retrieving monitoring data",
+                    staleness: "error",
                   });
                 } else if (latestLog) {
-                  // Use real monitoring data
+                  // Calculate staleness - consider data older than 5 minutes as stale
+                  const lastCheckTime = new Date(latestLog.checked_at);
+                  const now = new Date();
+                  const minutesSinceCheck = (now - lastCheckTime) / (1000 * 60);
+
+                  let staleness = "fresh";
+                  if (minutesSinceCheck > 10) {
+                    staleness = "very_stale";
+                  } else if (minutesSinceCheck > 5) {
+                    staleness = "stale";
+                  }
+
+                  // Use real monitoring data with enhanced details
                   resolve({
                     ...site,
                     status: latestLog.status,
                     last_checked: latestLog.checked_at,
                     response_time: latestLog.response_time,
+                    status_code: latestLog.status_code,
                     error_message: latestLog.error_message,
+                    staleness: staleness,
+                    minutes_since_check: Math.round(minutesSinceCheck),
                   });
                 } else {
-                  // No monitoring data yet, use site's current status or default
+                  // No monitoring data yet, treat as unknown with high priority
                   resolve({
                     ...site,
-                    status: site.current_status || "unknown",
+                    status: "unknown",
                     last_checked: "Never checked",
                     response_time: null,
-                    error_message: "No monitoring data available",
+                    status_code: null,
+                    error_message:
+                      "Site not yet monitored - monitoring may need to be configured",
+                    staleness: "never_checked",
+                    minutes_since_check: null,
                   });
                 }
               }
@@ -453,108 +474,212 @@ class AlertService {
       );
 
       console.log(
-        `[DEBUG] Real site statuses:`,
-        siteStatuses.map((s) => `${s.name}: ${s.status}`)
+        `[DEBUG] Real site statuses with staleness:`,
+        siteStatuses.map((s) => `${s.name}: ${s.status} (${s.staleness})`)
       );
 
+      // Enhanced categorization with staleness awareness
       const upSites = siteStatuses.filter((site) => site.status === "up");
       const downSites = siteStatuses.filter((site) => site.status === "down");
       const unknownSites = siteStatuses.filter(
         (site) => site.status === "unknown"
       );
+      const staleSites = siteStatuses.filter(
+        (site) => site.staleness === "stale" || site.staleness === "very_stale"
+      );
 
-      // Create comprehensive Slack message
-      const hasIssues = downSites.length > 0 || unknownSites.length > 0;
-      const mainColor = hasIssues ? "danger" : "good";
-      const mainEmoji = hasIssues ? "🚨" : "✅";
-      const overallStatus = hasIssues
-        ? "ISSUES DETECTED"
-        : "ALL SYSTEMS OPERATIONAL";
+      // Create comprehensive Slack message with enhanced status awareness
+      const hasIssues =
+        downSites.length > 0 ||
+        unknownSites.length > 0 ||
+        staleSites.length > 2;
+      const mainColor =
+        downSites.length > 0
+          ? "danger"
+          : unknownSites.length > 0 || staleSites.length > 2
+          ? "warning"
+          : "good";
+      const mainEmoji =
+        downSites.length > 0
+          ? "🚨"
+          : unknownSites.length > 0 || staleSites.length > 2
+          ? "⚠️"
+          : "✅";
+      const overallStatus =
+        downSites.length > 0
+          ? "CRITICAL ISSUES DETECTED"
+          : unknownSites.length > 0 || staleSites.length > 2
+          ? "MONITORING ISSUES DETECTED"
+          : "ALL SYSTEMS OPERATIONAL";
+
+      const uptimePercentage =
+        sites.length > 0
+          ? ((upSites.length / sites.length) * 100).toFixed(1)
+          : "0.0";
+
+      // Calculate average response time only from recent "up" sites (fresh data)
+      const freshUpSites = upSites.filter(
+        (site) => site.staleness === "fresh" && site.response_time
+      );
+      const avgResponseTime =
+        freshUpSites.length > 0
+          ? Math.round(
+              freshUpSites.reduce(
+                (sum, site) => sum + (site.response_time || 0),
+                0
+              ) / freshUpSites.length
+            )
+          : 0;
+
+      // Get fastest and slowest sites for performance insight
+      const fastestSite =
+        freshUpSites.length > 0
+          ? freshUpSites.reduce((prev, current) =>
+              prev.response_time < current.response_time ? prev : current
+            )
+          : null;
+
+      const slowestSite =
+        freshUpSites.length > 0
+          ? freshUpSites.reduce((prev, current) =>
+              prev.response_time > current.response_time ? prev : current
+            )
+          : null;
 
       const slackPayload = {
-        username: "Agency Uptime",
-        icon_emoji: ":warning:",
-        text: `${mainEmoji} ${agency.name} - Sites Status Report`,
+        username: "Agency Uptime Monitor",
+        icon_emoji:
+          downSites.length > 0
+            ? ":rotating_light:"
+            : unknownSites.length > 0 || staleSites.length > 2
+            ? ":warning:"
+            : ":white_check_mark:",
+        text: `${mainEmoji} *${agency.name}* - Real-Time Sites Monitoring Report`,
         attachments: [
           {
             color: mainColor,
             title: `${overallStatus}`,
             fields: [
               {
-                title: "📊 Overview",
-                value: `Total Sites: ${sites.length}\n✅ Up: ${
-                  upSites.length
-                }\n❌ Down: ${downSites.length}${
-                  unknownSites.length > 0
-                    ? `\n❓ Unknown: ${unknownSites.length}`
-                    : ""
-                }`,
+                title: "📊 Sites Overview",
+                value: `• Total Sites: ${sites.length}\n• ✅ Online: ${upSites.length}\n• ❌ Offline: ${downSites.length}\n• ❓ Unknown: ${unknownSites.length}\n• ⏱️ Stale Data: ${staleSites.length}\n• 📈 Uptime: ${uptimePercentage}%`,
                 short: true,
               },
               {
-                title: "🕐 Report Time",
-                value: new Date().toLocaleString(),
+                title: "⚡ Performance Metrics",
+                value: `• Avg Response: ${avgResponseTime}ms\n• Fresh Data Points: ${
+                  freshUpSites.length
+                }/${upSites.length}\n${
+                  fastestSite
+                    ? `• Fastest: ${fastestSite.name} (${fastestSite.response_time}ms)`
+                    : "• Fastest: N/A"
+                }\n${
+                  slowestSite
+                    ? `• Slowest: ${slowestSite.name} (${slowestSite.response_time}ms)`
+                    : "• Slowest: N/A"
+                }\n• Report Time: ${new Date().toLocaleString()}`,
                 short: true,
               },
             ],
-            footer: "Agency Uptime Status Report",
+            footer: `${agency.name} • Agency Uptime Monitor • Real-time monitoring data`,
+            footer_icon:
+              "https://api.slack.com/img/blocks/bkb_template_images/approvalsNewDevice.png",
             ts: Math.floor(Date.now() / 1000),
           },
         ],
       };
 
-      // Add detailed status for each site
+      // Add detailed status for each site category with enhanced information
       if (downSites.length > 0) {
         slackPayload.attachments.push({
           color: "danger",
-          title: `🚨 Sites Currently DOWN (${downSites.length})`,
-          fields: downSites.map((site) => {
+          title: `🚨 Sites Currently DOWN (${downSites.length}) - IMMEDIATE ATTENTION REQUIRED`,
+          fields: downSites.slice(0, 10).map((site) => {
             const lastChecked =
               site.last_checked === "Never checked"
                 ? "Never checked"
                 : new Date(site.last_checked).toLocaleString();
 
+            const statusInfo = site.status_code
+              ? ` (HTTP ${site.status_code})`
+              : "";
             const errorInfo = site.error_message
               ? `\n❌ Error: ${site.error_message}`
               : "";
+            const stalenessInfo =
+              site.staleness === "stale" || site.staleness === "very_stale"
+                ? `\n⚠️ Data is ${site.minutes_since_check} minutes old`
+                : "";
 
             return {
-              title: site.name,
-              value: `🔗 ${site.url}\n⏰ Last checked: ${lastChecked}${errorInfo}`,
+              title: `${site.name}${statusInfo}`,
+              value: `🔗 ${site.url}\n⏰ Last checked: ${lastChecked}${errorInfo}${stalenessInfo}`,
               short: true,
             };
           }),
-          footer: "Immediate attention required",
+          footer:
+            downSites.length > 10
+              ? `CRITICAL ISSUES • Showing 10 of ${downSites.length} down sites`
+              : "CRITICAL ISSUES • Immediate action required",
         });
       }
 
       if (unknownSites.length > 0) {
         slackPayload.attachments.push({
           color: "warning",
-          title: `❓ Sites with Unknown Status (${unknownSites.length})`,
-          fields: unknownSites.map((site) => {
+          title: `❓ Sites with Unknown Status (${unknownSites.length}) - MONITORING SETUP NEEDED`,
+          fields: unknownSites.slice(0, 10).map((site) => {
             const lastChecked =
               site.last_checked === "Never checked"
                 ? "Never checked"
                 : new Date(site.last_checked).toLocaleString();
 
+            const reason =
+              site.staleness === "never_checked"
+                ? "🔧 Not yet monitored"
+                : site.error_message || "Status unclear";
+
             return {
               title: site.name,
-              value: `🔗 ${site.url}\n⏰ Last checked: ${lastChecked}\n💭 ${
-                site.error_message || "No monitoring data available"
-              }`,
+              value: `🔗 ${site.url}\n⏰ Last checked: ${lastChecked}\n💭 ${reason}`,
               short: true,
             };
           }),
-          footer: "Monitoring setup may be required",
+          footer:
+            unknownSites.length > 10
+              ? `MONITORING ISSUES • Showing 10 of ${unknownSites.length} unknown sites`
+              : "MONITORING ISSUES • Setup may be required",
+        });
+      }
+
+      // Show stale data warning if significant
+      if (staleSites.length > 2) {
+        slackPayload.attachments.push({
+          color: "warning",
+          title: `⏱️ Sites with Stale Monitoring Data (${staleSites.length}) - DATA FRESHNESS ISSUE`,
+          fields: staleSites.slice(0, 8).map((site) => {
+            const lastChecked = new Date(site.last_checked).toLocaleString();
+            const stalenessDesc =
+              site.staleness === "very_stale" ? "Very stale" : "Stale";
+
+            return {
+              title: `${site.name} (${site.status.toUpperCase()})`,
+              value: `🔗 ${site.url}\n⏰ Last checked: ${lastChecked}\n⚠️ ${stalenessDesc} (${site.minutes_since_check} min ago)`,
+              short: true,
+            };
+          }),
+          footer:
+            staleSites.length > 8
+              ? `DATA FRESHNESS ISSUES • Showing 8 of ${staleSites.length} stale sites`
+              : "DATA FRESHNESS ISSUES • Monitoring service may need attention",
         });
       }
 
       if (upSites.length > 0) {
         slackPayload.attachments.push({
           color: "good",
-          title: `✅ Sites Currently UP (${upSites.length})`,
-          fields: upSites.map((site) => {
+          title: `✅ Sites Operating Normally (${upSites.length})`,
+          fields: upSites.slice(0, 10).map((site) => {
             const responseTime = site.response_time
               ? `${site.response_time}ms`
               : "N/A";
@@ -563,13 +688,24 @@ class AlertService {
                 ? "Never checked"
                 : new Date(site.last_checked).toLocaleString();
 
+            const statusCode = site.status_code ? ` (${site.status_code})` : "";
+            const freshnessIcon =
+              site.staleness === "fresh"
+                ? "🟢"
+                : site.staleness === "stale"
+                ? "🟡"
+                : "🟠";
+
             return {
-              title: site.name,
-              value: `🔗 ${site.url}\n⚡ Response: ${responseTime}\n⏰ Last checked: ${lastChecked}`,
+              title: `${site.name}${statusCode}`,
+              value: `🔗 ${site.url}\n⚡ Response: ${responseTime} ${freshnessIcon}\n⏰ Last checked: ${lastChecked}`,
               short: true,
             };
           }),
-          footer: "All systems operational",
+          footer:
+            upSites.length > 10
+              ? `ALL SYSTEMS OPERATIONAL • Showing 10 of ${upSites.length} sites`
+              : "ALL SYSTEMS OPERATIONAL",
         });
       }
 
@@ -581,7 +717,7 @@ class AlertService {
         );
       }
 
-      console.log(`[DEBUG] Sending comprehensive Slack status report...`);
+      console.log(`[DEBUG] Sending enhanced real-time Slack status report...`);
       const response = await axios.post(
         slackIntegration.webhook_url,
         slackPayload,
@@ -593,21 +729,19 @@ class AlertService {
         `[DEBUG] Slack response: ${response.status} - ${response.data}`
       );
 
-      // Log the alert
+      // Log the alert with enhanced details
       this.logAlert(
         agency.id,
         null, // No specific site for comprehensive report
         null, // No specific incident
         "slack",
         slackIntegration.webhook_url,
-        `All sites status report: ${upSites.length} up, ${
-          downSites.length
-        } down${
-          unknownSites.length > 0 ? `, ${unknownSites.length} unknown` : ""
-        }`
+        `Real-time status report: ${upSites.length} up, ${downSites.length} down, ${unknownSites.length} unknown, ${staleSites.length} stale data points`
       );
 
-      console.log(`✅ All sites Slack status report sent successfully`);
+      console.log(
+        `✅ Enhanced real-time Slack status report sent successfully`
+      );
     } catch (error) {
       console.error("❌ Failed to send all sites Slack alert:", error.message);
       if (error.response) {
@@ -995,9 +1129,12 @@ class AlertService {
   logAlert(agencyId, siteId, incidentId, type, recipient, message) {
     const db = getDatabase();
 
+    // For comprehensive reports without specific site, use a placeholder site_id of 0
+    const finalSiteId = siteId || 0;
+
     db.run(
       "INSERT INTO alerts (agency_id, site_id, incident_id, type, recipient, message) VALUES (?, ?, ?, ?, ?, ?)",
-      [agencyId, siteId, incidentId || null, type, recipient, message],
+      [agencyId, finalSiteId, incidentId || null, type, recipient, message],
       (err) => {
         if (err) {
           console.error("Failed to log alert:", err);
