@@ -1,6 +1,7 @@
 const nodemailer = require("nodemailer");
 const axios = require("axios");
 const { getDatabase } = require("../config/database");
+const ThirdPartyIntegrationsService = require("./third-party-integrations");
 
 class AlertService {
   constructor() {
@@ -39,6 +40,15 @@ class AlertService {
       if (alertSettings.slack_alerts) {
         alertPromises.push(this.sendSlackAlert(agency, site, incident));
       }
+      if (alertSettings.discord_alerts) {
+        alertPromises.push(this.sendDiscordAlert(agency, site, incident));
+      }
+      if (alertSettings.telegram_alerts) {
+        alertPromises.push(this.sendTelegramAlert(agency, site, incident));
+      }
+      if (alertSettings.teams_alerts) {
+        alertPromises.push(this.sendTeamsAlert(agency, site, incident));
+      }
       if (alertSettings.webhook_alerts) {
         alertPromises.push(this.sendWebhookAlert(agency, site, incident));
       }
@@ -53,6 +63,15 @@ class AlertService {
           break;
         case "slack":
           alertPromises.push(this.sendSlackAlert(agency, site, incident));
+          break;
+        case "discord":
+          alertPromises.push(this.sendDiscordAlert(agency, site, incident));
+          break;
+        case "telegram":
+          alertPromises.push(this.sendTelegramAlert(agency, site, incident));
+          break;
+        case "teams":
+          alertPromises.push(this.sendTeamsAlert(agency, site, incident));
           break;
         case "webhook":
           alertPromises.push(this.sendWebhookAlert(agency, site, incident));
@@ -709,6 +728,154 @@ class AlertService {
       await Promise.allSettled(webhookPromises);
     } catch (error) {
       console.error("Failed to send webhook alerts:", error);
+      throw error;
+    }
+  }
+
+  async sendDiscordAlert(agency, site, incident) {
+    try {
+      const db = getDatabase();
+
+      // Get Discord integration settings
+      const discordIntegration = await new Promise((resolve, reject) => {
+        db.get(
+          "SELECT * FROM discord_integrations WHERE agency_id = ? AND is_active = 1",
+          [agency.id],
+          (err, integration) => {
+            if (err) reject(err);
+            else resolve(integration);
+          }
+        );
+      });
+
+      if (!discordIntegration) {
+        console.log(
+          "No active Discord integration found for agency:",
+          agency.id
+        );
+        return;
+      }
+
+      const result = await ThirdPartyIntegrationsService.sendDiscordAlert(
+        agency.id,
+        site,
+        incident,
+        {
+          webhook_url: discordIntegration.webhook_url,
+          agency_name: agency.name,
+        }
+      );
+
+      if (result.success) {
+        this.logAlert(
+          agency.id,
+          site.id,
+          incident.id,
+          "discord",
+          discordIntegration.webhook_url,
+          `Discord alert: ${site.name} is ${incident.status}`
+        );
+      }
+    } catch (error) {
+      console.error("Failed to send Discord alert:", error);
+      throw error;
+    }
+  }
+
+  async sendTelegramAlert(agency, site, incident) {
+    try {
+      const db = getDatabase();
+
+      // Get Telegram integration settings
+      const telegramIntegration = await new Promise((resolve, reject) => {
+        db.get(
+          "SELECT * FROM telegram_integrations WHERE agency_id = ? AND is_active = 1",
+          [agency.id],
+          (err, integration) => {
+            if (err) reject(err);
+            else resolve(integration);
+          }
+        );
+      });
+
+      if (!telegramIntegration) {
+        console.log(
+          "No active Telegram integration found for agency:",
+          agency.id
+        );
+        return;
+      }
+
+      const result = await ThirdPartyIntegrationsService.sendTelegramAlert(
+        agency.id,
+        site,
+        incident,
+        {
+          bot_token: telegramIntegration.bot_token,
+          chat_id: telegramIntegration.chat_id,
+          agency_name: agency.name,
+        }
+      );
+
+      if (result.success) {
+        this.logAlert(
+          agency.id,
+          site.id,
+          incident.id,
+          "telegram",
+          `Bot: ${telegramIntegration.bot_token.substring(0, 10)}...`,
+          `Telegram alert: ${site.name} is ${incident.status}`
+        );
+      }
+    } catch (error) {
+      console.error("Failed to send Telegram alert:", error);
+      throw error;
+    }
+  }
+
+  async sendTeamsAlert(agency, site, incident) {
+    try {
+      const db = getDatabase();
+
+      // Get Teams integration settings
+      const teamsIntegration = await new Promise((resolve, reject) => {
+        db.get(
+          "SELECT * FROM teams_integrations WHERE agency_id = ? AND is_active = 1",
+          [agency.id],
+          (err, integration) => {
+            if (err) reject(err);
+            else resolve(integration);
+          }
+        );
+      });
+
+      if (!teamsIntegration) {
+        console.log("No active Teams integration found for agency:", agency.id);
+        return;
+      }
+
+      const result = await ThirdPartyIntegrationsService.sendTeamsAlert(
+        agency.id,
+        site,
+        incident,
+        {
+          webhook_url: teamsIntegration.webhook_url,
+          agency_name: agency.name,
+        }
+      );
+
+      if (result.success) {
+        this.logAlert(
+          agency.id,
+          site.id,
+          incident.id,
+          "teams",
+          teamsIntegration.webhook_url,
+          `Teams alert: ${site.name} is ${incident.status}`
+        );
+      }
+    } catch (error) {
+      console.error("Failed to send Teams alert:", error);
       throw error;
     }
   }

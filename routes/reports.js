@@ -371,6 +371,25 @@ router.post("/generate-white-label", authenticateToken, async (req, res) => {
   const { period_start, period_end, report_type = "monthly" } = req.body;
   const db = getDatabase();
 
+  // Check subscription status for white label features
+  const subscription = await new Promise((resolve, reject) => {
+    db.get(
+      "SELECT * FROM subscriptions WHERE agency_id = ? AND status = 'active' AND plan_type = 'basic'",
+      [req.agency.agencyId],
+      (err, result) => {
+        if (err) reject(err);
+        else resolve(result);
+      }
+    );
+  });
+
+  if (!subscription) {
+    return res.status(403).json({
+      error: "White label reports require Pro subscription",
+      upgrade_required: true,
+    });
+  }
+
   try {
     // Get agency details
     const agency = await new Promise((resolve, reject) => {

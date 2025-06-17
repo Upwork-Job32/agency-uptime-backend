@@ -1,7 +1,10 @@
 const express = require("express");
-const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const { getDatabase } = require("../config/database");
 const { authenticateToken } = require("../middleware/auth");
+const config = require("../config/environment");
+
+// Initialize Stripe with test key
+const stripe = require("stripe")(config.STRIPE_SECRET_KEY);
 
 const router = express.Router();
 
@@ -29,15 +32,13 @@ router.get("/subscription", authenticateToken, (req, res) => {
         trialEndDate.setDate(trialEndDate.getDate() + 15);
 
         db.run(
-          "INSERT INTO subscriptions (agency_id, plan_type, status, trial_start_date, current_period_start, current_period_end, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          "INSERT INTO subscriptions (agency_id, plan_type, status, current_period_start, current_period_end) VALUES (?, ?, ?, ?, ?)",
           [
             req.agency.agencyId,
             "trial",
             "trialing",
             now.toISOString(),
-            now.toISOString(),
             trialEndDate.toISOString(),
-            now.toISOString(),
           ],
           function (err) {
             if (err) {
@@ -52,49 +53,33 @@ router.get("/subscription", authenticateToken, (req, res) => {
                 agency_id: req.agency.agencyId,
                 plan_type: "trial",
                 status: "trialing",
-                trial_start_date: now.toISOString(),
                 current_period_start: now.toISOString(),
                 current_period_end: trialEndDate.toISOString(),
+                stripe_subscription_id: null,
                 active_addons: [],
               },
             });
           }
         );
-        return;
+      } else {
+        res.json({
+          subscription: {
+            ...subscription,
+            active_addons: subscription.active_addons
+              ? subscription.active_addons.split(",")
+              : [],
+          },
+        });
       }
-
-      // Check if trial has expired
-      if (subscription.status === "trialing" && subscription.trial_start_date) {
-        const trialStart = new Date(subscription.trial_start_date);
-        const daysSinceStart = Math.floor(
-          (Date.now() - trialStart.getTime()) / (1000 * 60 * 60 * 24)
-        );
-
-        if (daysSinceStart >= 15) {
-          // Update expired trial
-          db.run(
-            "UPDATE subscriptions SET status = 'expired' WHERE id = ?",
-            [subscription.id],
-            (err) => {
-              if (err) {
-                console.error("Error updating expired trial:", err);
-              }
-            }
-          );
-          subscription.status = "expired";
-        }
-      }
-
-      res.json({
-        subscription: {
-          ...subscription,
-          active_addons: subscription.active_addons
-            ? subscription.active_addons.split(",")
-            : [],
-        },
-      });
     }
   );
+});
+
+// Get Stripe publishable key
+router.get("/config", (req, res) => {
+  res.json({
+    publishableKey: config.STRIPE_PUBLISHABLE_KEY,
+  });
 });
 
 // Create Stripe checkout session
@@ -110,8 +95,8 @@ router.post("/create-checkout-session", authenticateToken, async (req, res) => {
         price_data: {
           currency: "usd",
           product_data: {
-            name: "Agency Uptime - Basic Plan",
-            description: "Monitor up to 1000 sites with 5-minute checks",
+            name: "Agency Uptime - Professional Plan",
+            description: "Monitor unlimited sites with 1-minute checks",
           },
           unit_amount: 5000, // $50.00
           recurring: {
@@ -180,8 +165,8 @@ router.post("/create-checkout-session", authenticateToken, async (req, res) => {
       payment_method_types: ["card"],
       line_items: lineItems,
       mode: "subscription",
-      success_url: `${process.env.FRONTEND_URL}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${process.env.FRONTEND_URL}/billing/cancel`,
+      success_url: `${config.FRONTEND_URL}/billing/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${config.FRONTEND_URL}/billing/cancel`,
       client_reference_id: req.agency.agencyId.toString(),
       metadata: {
         agency_id: req.agency.agencyId.toString(),
@@ -210,99 +195,281 @@ router.get("/success/:session_id", authenticateToken, async (req, res) => {
 
     const db = getDatabase();
 
-    // Update subscription
-    db.run(
-      "UPDATE subscriptions SET status = ?, stripe_subscription_id = ?, current_period_start = ?, current_period_end = ? WHERE agency_id = ?",
-      [
-        "active",
-        session.subscription,
-        new Date(),
-        new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
-        req.agency.agencyId,
-      ],
-      (err) => {
-        if (err) {
-          console.error("Database error:", err);
-          return res
-            .status(500)
-            .json({ error: "Failed to update subscription" });
-        }
-
-        // Update agency subscription status
-        db.run("UPDATE agencies SET subscription_status = ? WHERE id = ?", [
+    // Update subscription in a transaction-like manner
+    db.serialize(() => {
+      // Update subscription
+      db.run(
+        "UPDATE subscriptions SET status = ?, stripe_subscription_id = ?, current_period_start = ?, current_period_end = ?, plan_type = ? WHERE agency_id = ?",
+        [
           "active",
+          session.subscription,
+          new Date().toISOString(),
+          new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
+          session.metadata?.plan_type || "basic",
           req.agency.agencyId,
-        ]);
+        ],
+        function (err) {
+          if (err) {
+            console.error("Database error updating subscription:", err);
+            return res
+              .status(500)
+              .json({ error: "Failed to update subscription" });
+          }
 
-        res.json({ message: "Subscription activated successfully" });
-      }
-    );
+          console.log(`Subscription updated for agency ${req.agency.agencyId}`);
+
+          // Update agency subscription status
+          db.run(
+            "UPDATE agencies SET subscription_status = ? WHERE id = ?",
+            ["active", req.agency.agencyId],
+            (err) => {
+              if (err) {
+                console.error("Failed to update agency status:", err);
+              } else {
+                console.log(
+                  `Agency ${req.agency.agencyId} status updated to active`
+                );
+              }
+            }
+          );
+
+          // Handle add-ons if present in metadata
+          if (session.metadata && session.metadata.addons) {
+            try {
+              const addons = JSON.parse(session.metadata.addons);
+              console.log(
+                `Processing ${addons.length} add-ons for agency ${req.agency.agencyId}:`,
+                addons
+              );
+
+              // Add each addon to the database
+              let processedAddons = 0;
+              const totalAddons = addons.length;
+
+              if (totalAddons === 0) {
+                return res.json({
+                  message: "Subscription activated successfully",
+                  subscription: {
+                    status: "active",
+                    stripe_subscription_id: session.subscription,
+                    plan_type: session.metadata?.plan_type || "basic",
+                  },
+                });
+              }
+
+              addons.forEach((addonType) => {
+                db.run(
+                  "INSERT OR REPLACE INTO addons (agency_id, addon_type, is_active, created_at) VALUES (?, ?, ?, ?)",
+                  [req.agency.agencyId, addonType, 1, new Date().toISOString()],
+                  function (err) {
+                    processedAddons++;
+
+                    if (err) {
+                      console.error(`Failed to add addon ${addonType}:`, err);
+                    } else {
+                      console.log(
+                        `Successfully added addon ${addonType} for agency ${req.agency.agencyId} (ID: ${this.lastID})`
+                      );
+                    }
+
+                    // Send response when all add-ons are processed
+                    if (processedAddons === totalAddons) {
+                      res.json({
+                        message: "Subscription activated successfully",
+                        subscription: {
+                          status: "active",
+                          stripe_subscription_id: session.subscription,
+                          plan_type: session.metadata?.plan_type || "basic",
+                          addons_processed: totalAddons,
+                        },
+                      });
+                    }
+                  }
+                );
+              });
+            } catch (err) {
+              console.error("Failed to parse addons metadata:", err);
+              res.json({
+                message:
+                  "Subscription activated successfully, but failed to process add-ons",
+                subscription: {
+                  status: "active",
+                  stripe_subscription_id: session.subscription,
+                  plan_type: session.metadata?.plan_type || "basic",
+                },
+                warning: "Add-ons may not have been activated",
+              });
+            }
+          } else {
+            // No add-ons to process
+            res.json({
+              message: "Subscription activated successfully",
+              subscription: {
+                status: "active",
+                stripe_subscription_id: session.subscription,
+                plan_type: session.metadata?.plan_type || "basic",
+              },
+            });
+          }
+        }
+      );
+    });
   } catch (error) {
     console.error("Payment success error:", error);
     res.status(500).json({ error: "Failed to process payment success" });
   }
 });
 
-// Toggle add-on
-router.post("/toggle-addon", authenticateToken, async (req, res) => {
-  const { addon_type } = req.body;
+// Cancel subscription
+router.post("/cancel-subscription", authenticateToken, async (req, res) => {
+  try {
+    const db = getDatabase();
 
-  if (
-    !["pdf_reports", "status_pages", "resell_dashboard"].includes(addon_type)
-  ) {
-    return res.status(400).json({ error: "Invalid addon type" });
+    // Get current subscription
+    db.get(
+      "SELECT * FROM subscriptions WHERE agency_id = ?",
+      [req.agency.agencyId],
+      async (err, subscription) => {
+        if (err) {
+          return res.status(500).json({ error: "Database error" });
+        }
+
+        if (!subscription || !subscription.stripe_subscription_id) {
+          return res
+            .status(404)
+            .json({ error: "No active subscription found" });
+        }
+
+        try {
+          // Cancel subscription in Stripe
+          await stripe.subscriptions.cancel(
+            subscription.stripe_subscription_id
+          );
+
+          // Update database
+          db.run(
+            "UPDATE subscriptions SET status = ? WHERE agency_id = ?",
+            ["canceled", req.agency.agencyId],
+            (err) => {
+              if (err) {
+                console.error("Database error:", err);
+                return res
+                  .status(500)
+                  .json({ error: "Failed to update subscription status" });
+              }
+
+              res.json({ message: "Subscription canceled successfully" });
+            }
+          );
+        } catch (stripeError) {
+          console.error("Stripe cancellation error:", stripeError);
+          res.status(500).json({ error: "Failed to cancel subscription" });
+        }
+      }
+    );
+  } catch (error) {
+    console.error("Cancel subscription error:", error);
+    res.status(500).json({ error: "Failed to cancel subscription" });
   }
+});
 
-  const db = getDatabase();
+// Update payment method
+router.post("/update-payment-method", authenticateToken, async (req, res) => {
+  try {
+    const { payment_method_id } = req.body;
+    const db = getDatabase();
 
-  // Check if addon exists
-  db.get(
-    "SELECT * FROM addons WHERE agency_id = ? AND addon_type = ?",
-    [req.agency.agencyId, addon_type],
-    (err, addon) => {
-      if (err) {
-        return res.status(500).json({ error: "Database error" });
-      }
+    // Get current subscription
+    db.get(
+      "SELECT * FROM subscriptions WHERE agency_id = ?",
+      [req.agency.agencyId],
+      async (err, subscription) => {
+        if (err) {
+          return res.status(500).json({ error: "Database error" });
+        }
 
-      if (addon) {
-        // Toggle existing addon
-        db.run(
-          "UPDATE addons SET is_active = ? WHERE id = ?",
-          [addon.is_active ? 0 : 1, addon.id],
-          (err) => {
-            if (err) {
-              return res.status(500).json({ error: "Failed to toggle addon" });
+        if (!subscription || !subscription.stripe_subscription_id) {
+          return res
+            .status(404)
+            .json({ error: "No active subscription found" });
+        }
+
+        try {
+          // Get the subscription from Stripe
+          const stripeSubscription = await stripe.subscriptions.retrieve(
+            subscription.stripe_subscription_id
+          );
+
+          // Update the default payment method
+          await stripe.subscriptions.update(
+            subscription.stripe_subscription_id,
+            {
+              default_payment_method: payment_method_id,
             }
+          );
 
-            res.json({
-              message: `Add-on ${
-                addon.is_active ? "deactivated" : "activated"
-              } successfully`,
-              is_active: !addon.is_active,
-            });
-          }
-        );
-      } else {
-        // Create new addon
-        db.run(
-          "INSERT INTO addons (agency_id, addon_type, is_active) VALUES (?, ?, ?)",
-          [req.agency.agencyId, addon_type, 1],
-          (err) => {
-            if (err) {
-              return res
-                .status(500)
-                .json({ error: "Failed to activate addon" });
-            }
-
-            res.json({
-              message: "Add-on activated successfully",
-              is_active: true,
-            });
-          }
-        );
+          res.json({ message: "Payment method updated successfully" });
+        } catch (stripeError) {
+          console.error("Stripe update error:", stripeError);
+          res.status(500).json({ error: "Failed to update payment method" });
+        }
       }
-    }
-  );
+    );
+  } catch (error) {
+    console.error("Update payment method error:", error);
+    res.status(500).json({ error: "Failed to update payment method" });
+  }
+});
+
+// Get billing history
+router.get("/invoices", authenticateToken, async (req, res) => {
+  try {
+    const db = getDatabase();
+
+    // Get current subscription
+    db.get(
+      "SELECT * FROM subscriptions WHERE agency_id = ?",
+      [req.agency.agencyId],
+      async (err, subscription) => {
+        if (err) {
+          return res.status(500).json({ error: "Database error" });
+        }
+
+        if (!subscription || !subscription.stripe_subscription_id) {
+          return res.json({ invoices: [] });
+        }
+
+        try {
+          // Get invoices from Stripe
+          const invoices = await stripe.invoices.list({
+            subscription: subscription.stripe_subscription_id,
+            limit: 12,
+          });
+
+          res.json({
+            invoices: invoices.data.map((invoice) => ({
+              id: invoice.id,
+              amount_due: invoice.amount_due,
+              amount_paid: invoice.amount_paid,
+              currency: invoice.currency,
+              status: invoice.status,
+              created: invoice.created,
+              period_start: invoice.period_start,
+              period_end: invoice.period_end,
+              hosted_invoice_url: invoice.hosted_invoice_url,
+              invoice_pdf: invoice.invoice_pdf,
+            })),
+          });
+        } catch (stripeError) {
+          console.error("Stripe invoices error:", stripeError);
+          res.status(500).json({ error: "Failed to fetch invoices" });
+        }
+      }
+    );
+  } catch (error) {
+    console.error("Get invoices error:", error);
+    res.status(500).json({ error: "Failed to get billing history" });
+  }
 });
 
 module.exports = router;

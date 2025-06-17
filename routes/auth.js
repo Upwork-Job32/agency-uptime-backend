@@ -205,43 +205,78 @@ router.put(
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { name, brand_color, custom_domain } = req.body;
+    const { name, brand_color, custom_domain, logo_url } = req.body;
     const db = getDatabase();
 
-    const updates = [];
-    const values = [];
+    // Check if user is trying to update white label settings
+    const hasWhiteLabelSettings = brand_color || custom_domain || logo_url;
 
-    if (name) {
-      updates.push("name = ?");
-      values.push(name);
-    }
-    if (brand_color) {
-      updates.push("brand_color = ?");
-      values.push(brand_color);
-    }
-    if (custom_domain !== undefined) {
-      updates.push("custom_domain = ?");
-      values.push(custom_domain);
-    }
+    if (hasWhiteLabelSettings) {
+      // Check subscription status for white label features
+      db.get(
+        "SELECT * FROM subscriptions WHERE agency_id = ? AND status = 'active' AND plan_type = 'basic'",
+        [req.agency.agencyId],
+        (err, subscription) => {
+          if (err) {
+            return res.status(500).json({ error: "Database error" });
+          }
 
-    if (updates.length === 0) {
-      return res.status(400).json({ error: "No fields to update" });
-    }
+          if (!subscription) {
+            return res.status(403).json({
+              error: "White label features require Pro subscription",
+              upgrade_required: true,
+            });
+          }
 
-    updates.push("updated_at = CURRENT_TIMESTAMP");
-    values.push(req.agency.agencyId);
-
-    db.run(
-      `UPDATE agencies SET ${updates.join(", ")} WHERE id = ?`,
-      values,
-      (err) => {
-        if (err) {
-          return res.status(500).json({ error: "Failed to update profile" });
+          // User has Pro subscription, proceed with update
+          performProfileUpdate();
         }
+      );
+    } else {
+      // No white label settings, proceed normally
+      performProfileUpdate();
+    }
 
-        res.json({ message: "Profile updated successfully" });
+    function performProfileUpdate() {
+      const updates = [];
+      const values = [];
+
+      if (name) {
+        updates.push("name = ?");
+        values.push(name);
       }
-    );
+      if (brand_color) {
+        updates.push("brand_color = ?");
+        values.push(brand_color);
+      }
+      if (custom_domain !== undefined) {
+        updates.push("custom_domain = ?");
+        values.push(custom_domain);
+      }
+      if (logo_url !== undefined) {
+        updates.push("logo_url = ?");
+        values.push(logo_url);
+      }
+
+      if (updates.length === 0) {
+        return res.status(400).json({ error: "No fields to update" });
+      }
+
+      updates.push("updated_at = CURRENT_TIMESTAMP");
+      values.push(req.agency.agencyId);
+
+      db.run(
+        `UPDATE agencies SET ${updates.join(", ")} WHERE id = ?`,
+        values,
+        (err) => {
+          if (err) {
+            return res.status(500).json({ error: "Failed to update profile" });
+          }
+
+          res.json({ message: "Profile updated successfully" });
+        }
+      );
+    }
   }
 );
 
