@@ -171,8 +171,14 @@ router.post(
 router.get("/profile", authenticateToken, (req, res) => {
   const db = getDatabase();
 
+  // Join with subscriptions table to get accurate subscription info
   db.get(
-    "SELECT id, name, email, logo_url, brand_color, custom_domain, subscription_status FROM agencies WHERE id = ?",
+    `SELECT a.id, a.name, a.email, a.logo_url, a.brand_color, a.custom_domain, a.subscription_status,
+     s.plan_type, s.status as subscription_status_current, s.current_period_start, s.current_period_end,
+     s.stripe_subscription_id
+     FROM agencies a 
+     LEFT JOIN subscriptions s ON a.id = s.agency_id 
+     WHERE a.id = ?`,
     [req.agency.agencyId],
     (err, agency) => {
       if (err) {
@@ -183,9 +189,71 @@ router.get("/profile", authenticateToken, (req, res) => {
         return res.status(404).json({ error: "Agency not found" });
       }
 
-      res.json({ agency });
+      // Determine the actual subscription status based on subscriptions table
+      let actualSubscriptionStatus = "trial";
+
+      if (agency.subscription_status_current) {
+        if (
+          agency.subscription_status_current === "active" &&
+          agency.plan_type === "basic"
+        ) {
+          actualSubscriptionStatus = "active"; // This is Pro
+        } else if (agency.subscription_status_current === "trialing") {
+          actualSubscriptionStatus = "trial";
+        } else {
+          actualSubscriptionStatus = agency.subscription_status_current;
+        }
+      }
+
+      // Sync the agencies table with the actual status if they differ
+      if (agency.subscription_status !== actualSubscriptionStatus) {
+        db.run(
+          "UPDATE agencies SET subscription_status = ? WHERE id = ?",
+          [actualSubscriptionStatus, req.agency.agencyId],
+          (err) => {
+            if (err) {
+              console.error("Failed to sync agency subscription status:", err);
+            } else {
+              console.log(
+                `Synced agency ${req.agency.agencyId} subscription status to ${actualSubscriptionStatus}`
+              );
+            }
+          }
+        );
+      }
+
+      res.json({
+        agency: {
+          id: agency.id,
+          name: agency.name,
+          email: agency.email,
+          logo_url: agency.logo_url,
+          brand_color: agency.brand_color,
+          custom_domain: agency.custom_domain,
+          subscription_status: actualSubscriptionStatus,
+          plan_type: agency.plan_type,
+          subscription_details: {
+            status: agency.subscription_status_current,
+            plan_type: agency.plan_type,
+            current_period_start: agency.current_period_start,
+            current_period_end: agency.current_period_end,
+            stripe_subscription_id: agency.stripe_subscription_id,
+          },
+        },
+      });
     }
   );
+});
+
+// Validate token endpoint
+router.get("/validate", authenticateToken, (req, res) => {
+  // If we reach here, the token is valid (middleware passed)
+  res.json({
+    valid: true,
+    message: "Token is valid",
+    agencyId: req.agency.agencyId,
+    email: req.agency.email,
+  });
 });
 
 // Update agency profile

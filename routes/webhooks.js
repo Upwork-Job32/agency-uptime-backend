@@ -115,9 +115,10 @@ router.post(
 
           // Update subscription status
           db.run(
-            "UPDATE subscriptions SET status = ?, stripe_subscription_id = ?, current_period_start = ?, current_period_end = ? WHERE agency_id = ?",
+            "UPDATE subscriptions SET status = ?, plan_type = ?, stripe_subscription_id = ?, current_period_start = ?, current_period_end = ? WHERE agency_id = ?",
             [
               "active",
+              "basic", // Pro plan is stored as "basic"
               session.subscription,
               new Date().toISOString(),
               new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),

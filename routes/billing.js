@@ -205,7 +205,7 @@ router.get("/success/:session_id", authenticateToken, async (req, res) => {
           session.subscription,
           new Date().toISOString(),
           new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          session.metadata?.plan_type || "basic",
+          "basic", // Pro plan is always "basic" in our system
           req.agency.agencyId,
         ],
         function (err) {
